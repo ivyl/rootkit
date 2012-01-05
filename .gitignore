@@ -1,0 +1,13 @@
+/paper/*.pdf
+/paper/*.aux
+/paper/*.log
+/paper/*.toc
+/tools/giveroot
+Module.symvers
+modules.order
+.tmp_versions
+.rt*
+**.ko
+**.mod.*
+**.o
+**.swp
